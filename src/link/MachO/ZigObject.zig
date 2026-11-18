@@ -33,6 +33,14 @@ relocs: RelocationTable = .empty,
 
 dwarf: ?Dwarf = null,
 
+/// Each function's island (aarch64): room after its code for a range-extension trampoline per
+/// distinct branch target, so a branch too far for one `bl` reaches its target from anywhere
+/// in `__TEXT_ZIG` (`islandTrampoline`). Indexed by Atom.Index.
+islands: std.AutoHashMapUnmanaged(Atom.Index, Island) = .empty,
+/// The farthest a branch reaches directly: a `bl`'s 128 MiB, or less for tests
+/// (`ZORG_DEBUG_BRANCH_REACH`).
+branch_reach: u64 = std.math.maxInt(i28),
+
 output_symtab_ctx: MachO.SymtabCtx = .{},
 output_ar_state: Archive.ArState = .{},
 
@@ -51,6 +59,9 @@ pub fn init(self: *ZigObject, macho_file: *MachO) !void {
 
     try self.atoms.append(gpa, .{ .extra = try self.addAtomExtra(gpa, .{}) }); // null input section
     try self.strtab.buffer.append(gpa, 0);
+
+    if (std.zig.EnvVar.ZIG_DEBUG_BRANCH_REACH.get(comp.environ_map)) |reach|
+        self.branch_reach = @min(std.fmt.parseInt(u64, reach, 0) catch self.branch_reach, self.branch_reach);
 
     switch (comp.config.debug_format) {
         .strip => {},
@@ -99,6 +110,10 @@ pub fn deinit(self: *ZigObject, allocator: Allocator) void {
         tlv_init.deinit(allocator);
     }
     self.tlv_initializers.deinit(allocator);
+
+    var islands = self.islands.valueIterator();
+    while (islands.next()) |island| island.targets.deinit(allocator);
+    self.islands.deinit(allocator);
 
     if (self.dwarf) |*dwarf| {
         dwarf.deinit();
@@ -719,6 +734,10 @@ pub fn uavSymbol(
 
 fn freeNavMetadata(self: *ZigObject, macho_file: *MachO, sym_index: Symbol.Index) void {
     const sym = self.symbols.items[sym_index];
+    if (self.islands.fetchRemove(sym.getAtom(macho_file).?.atom_index)) |kv| {
+        var island = kv.value;
+        island.targets.deinit(macho_file.base.comp.gpa);
+    }
     sym.getAtom(macho_file).?.free(macho_file);
     log.debug("adding %{d} to local symbols free list", .{sym_index});
     // TODO redo this
@@ -774,6 +793,8 @@ pub fn updateFunc(
         error.WriteFailed => return error.OutOfMemory,
         else => |e| return e,
     };
+    const func_len = aw.written().len;
+    try self.reserveIsland(macho_file, self.symbols.items[sym_index].getAtom(macho_file).?.*, func_len, &aw.writer);
     const code = aw.written();
 
     const sect_index = try self.getNavOutputSection(macho_file, zcu, func.owner_nav, code, true);
@@ -787,7 +808,7 @@ pub fn updateFunc(
         break :blk .{ atom.value, atom.alignment };
     };
 
-    if (debug_wip_nav) |*wip_nav| self.dwarf.?.finishWipNavFunc(pt, func.owner_nav, code.len, wip_nav) catch |err|
+    if (debug_wip_nav) |*wip_nav| self.dwarf.?.finishWipNavFunc(pt, func.owner_nav, func_len, wip_nav) catch |err|
         return macho_file.base.cgFail(func.owner_nav, "falied to finish dwarf function: {s}", .{@errorName(err)});
 
     // Exports will be updated by `Zcu.processExports` after the update.
@@ -828,6 +849,53 @@ pub fn updateFunc(
         writeTrampoline(source_sym, target_sym, macho_file) catch |err|
             return macho_file.base.cgFail(func.owner_nav, "failed to write trampoline: {s}", .{@errorName(err)});
     }
+}
+
+const Island = struct {
+    /// Where the island starts in the function's atom: right after its code.
+    off: u32,
+    /// The function's distinct branch targets (`Relocation.target`), one trampoline each, in
+    /// this order.
+    targets: std.AutoArrayHashMapUnmanaged(u32, void) = .empty,
+};
+
+/// Appends room for `atom`'s island to its code (aarch64 MachO, where a branch reaches only
+/// 128 MiB): one trampoline per distinct branch target. Written only when a branch needs it
+/// (`islandTrampoline`); otherwise it stays zeros, never executed. The island moves with its
+/// function, so it is always in reach of the branches that use it.
+fn reserveIsland(self: *ZigObject, macho_file: *MachO, atom: Atom, func_len: usize, writer: *Writer) link.Error!void {
+    const gpa = macho_file.base.comp.gpa;
+    if (self.islands.fetchRemove(atom.atom_index)) |kv| {
+        var old = kv.value;
+        old.targets.deinit(gpa);
+    }
+    if (macho_file.getTarget().cpu.arch != .aarch64) return;
+    var island: Island = .{ .off = @intCast(func_len) };
+    errdefer island.targets.deinit(gpa);
+    for (atom.getRelocs(macho_file)) |rel| {
+        if (rel.type == .branch) try island.targets.put(gpa, rel.target, {});
+    }
+    if (island.targets.count() == 0) return;
+    writer.splatByteAll(0, island.targets.count() * Thunk.trampoline_size) catch return error.OutOfMemory;
+    try self.islands.put(gpa, atom.atom_index, island);
+}
+
+/// Whether a branch of a Zig function reaches `disp` bytes directly.
+pub fn branchInReach(self: *const ZigObject, disp: i64) bool {
+    return @abs(disp) <= self.branch_reach;
+}
+
+/// The trampoline in `atom`'s island that takes its branch `rel` to `target`, written into the
+/// atom's `code` here; null when the atom has no island slot for it.
+pub fn islandTrampoline(self: *ZigObject, atom: Atom, rel: Relocation, target: u64, code: []u8, macho_file: *MachO) !?u64 {
+    const island = self.islands.get(atom.atom_index) orelse return null;
+    const slot = island.targets.getIndex(rel.target) orelse return null;
+    const off = island.off + slot * Thunk.trampoline_size;
+    if (off + Thunk.trampoline_size > code.len) return null;
+    const saddr = atom.getAddress(macho_file) + off;
+    var writer: Writer = .fixed(code[off..][0..Thunk.trampoline_size]);
+    Thunk.writeTrampoline(saddr, target, &writer) catch return error.Overflow;
+    return saddr;
 }
 
 pub fn updateNav(
@@ -1778,6 +1846,7 @@ const Zcu = @import("../../Zcu.zig");
 const Object = @import("Object.zig");
 const Relocation = @import("Relocation.zig");
 const Symbol = @import("Symbol.zig");
+const Thunk = @import("Thunk.zig");
 const StringTable = @import("../StringTable.zig");
 const Type = @import("../../Type.zig");
 const Value = @import("../../Value.zig");

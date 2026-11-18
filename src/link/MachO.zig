@@ -3416,7 +3416,7 @@ fn initMetadata(self: *MachO, options: InitMetadataOptions) !void {
             self.zig_const_seg_index = try self.addSegment("__CONST_ZIG", .{
                 .fileoff = off,
                 .filesize = filesize,
-                .vmaddr = base_vmaddr + 0xc000000,
+                .vmaddr = base_vmaddr + 0x4000000 + zig_text_window,
                 .vmsize = filesize,
                 .prot = .{ .READ = true, .WRITE = true },
             });
@@ -3428,7 +3428,7 @@ fn initMetadata(self: *MachO, options: InitMetadataOptions) !void {
             self.zig_data_seg_index = try self.addSegment("__DATA_ZIG", .{
                 .fileoff = off,
                 .filesize = filesize,
-                .vmaddr = base_vmaddr + 0x10000000,
+                .vmaddr = base_vmaddr + 0x8000000 + zig_text_window,
                 .vmsize = filesize,
                 .prot = .{ .READ = true, .WRITE = true },
             });
@@ -3437,7 +3437,7 @@ fn initMetadata(self: *MachO, options: InitMetadataOptions) !void {
         {
             const memsize: u64 = 1024;
             self.zig_bss_seg_index = try self.addSegment("__BSS_ZIG", .{
-                .vmaddr = base_vmaddr + 0x14000000,
+                .vmaddr = base_vmaddr + 0xc000000 + zig_text_window,
                 .vmsize = memsize,
                 .prot = .{ .READ = true, .WRITE = true },
             });
@@ -4456,6 +4456,11 @@ pub const min_text_capacity = padToIdeal(minimum_text_block_size);
 /// Default virtual memory offset corresponds to the size of __PAGEZERO segment and
 /// start of __TEXT segment.
 pub const default_pagezero_size: u64 = 0x100000000;
+
+/// How far `__TEXT_ZIG` may grow (it starts 64 MiB above `__TEXT`); the Zig segments after it
+/// sit above that. Beyond a branch's 128 MiB reach a Zig function calls through its own
+/// island (`ZigObject.islandTrampoline`).
+const zig_text_window: u64 = 0x20000000;
 
 /// We commit 0x1000 = 4096 bytes of space to the header and
 /// the table of load commands. This should be plenty for any

@@ -24,6 +24,9 @@
         .mix_c_files = .{
             .path = "mix_c_files",
         },
+        .macho_far_branch = .{
+            .path = "macho_far_branch",
+        },
         .global_linkage = .{
             .path = "global_linkage",
         },
