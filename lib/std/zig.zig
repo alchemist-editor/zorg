@@ -965,6 +965,9 @@ pub const EnvVar = enum {
     ZIG_VERBOSE_CC,
     ZIG_VERBOSE_CMD,
     ZIG_DEBUG_CMD,
+    /// zorg, testing only: the farthest a Zig function's branch reaches directly on aarch64
+    /// MachO (bytes); farther ones go through the function's island.
+    ZIG_DEBUG_BRANCH_REACH,
     ZIG_IS_DETECTING_LIBC_PATHS,
     ZIG_IS_AVOIDING_CALLING_ITSELF,
 

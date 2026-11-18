@@ -109,8 +109,10 @@ pub fn setAlive(self: *Atom, alive: bool) void {
     _ = self.alive.swap(alive, .seq_cst);
 }
 
-pub fn getThunk(self: Atom, macho_file: *MachO) *Thunk {
+/// Null for an atom no thunk was made for (`createThunks`).
+pub fn getThunk(self: Atom, macho_file: *MachO) ?*Thunk {
     const extra = self.getExtra(macho_file);
+    if (extra.thunk >= macho_file.thunks.items.len) return null;
     return macho_file.getThunk(extra.thunk);
 }
 
@@ -717,9 +719,18 @@ fn resolveRelocInner(
             switch (cpu_arch) {
                 .x86_64 => try writer.writeInt(i32, @intCast(S + A - P), .little),
                 .aarch64 => {
-                    const disp: i28 = math.cast(i28, S + A - P) orelse blk: {
-                        const thunk = self.getThunk(macho_file);
-                        const S_: i64 = @intCast(thunk.getTargetAddress(rel.getTargetSymbolRef(self, macho_file), macho_file));
+                    // Out of reach, a branch goes through a trampoline: its section's thunk for an
+                    // input object's atom, its own island for a Zig function (`ZigObject`).
+                    const ref = rel.getTargetSymbolRef(self, macho_file);
+                    const file = self.getFile(macho_file);
+                    const in_reach = if (file == .zig_object) file.zig_object.branchInReach(S + A - P) else true;
+                    const direct: ?i28 = if (in_reach) math.cast(i28, S + A - P) else null;
+                    const disp: i28 = direct orelse blk: {
+                        const trampoline = switch (file) {
+                            .zig_object => |zo| try zo.islandTrampoline(self, rel, @intCast(S), code, macho_file),
+                            else => if (self.getThunk(macho_file)) |thunk| thunk.getTargetAddress(ref, macho_file) else null,
+                        } orelse return error.Overflow;
+                        const S_: i64 = @intCast(trampoline);
                         break :blk math.cast(i28, S_ + A - P) orelse return error.Overflow;
                     };
                     aarch64.writeBranchImm(disp, code[rel_offset..][0..4]);

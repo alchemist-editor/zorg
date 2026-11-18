@@ -16,23 +16,30 @@ pub fn getAddress(thunk: Thunk, macho_file: *MachO) u64 {
     return header.addr + thunk.value;
 }
 
-pub fn getTargetAddress(thunk: Thunk, ref: MachO.Ref, macho_file: *MachO) u64 {
-    return thunk.getAddress(macho_file) + thunk.symbols.getIndex(ref).? * trampoline_size;
+/// Null when the thunk holds no trampoline to `ref`.
+pub fn getTargetAddress(thunk: Thunk, ref: MachO.Ref, macho_file: *MachO) ?u64 {
+    const index = thunk.symbols.getIndex(ref) orelse return null;
+    return thunk.getAddress(macho_file) + index * trampoline_size;
 }
 
 pub fn write(thunk: Thunk, macho_file: *MachO, writer: anytype) !void {
-    const Instruction = aarch64.encoding.Instruction;
     for (thunk.symbols.keys(), 0..) |ref, i| {
         const sym = ref.getSymbol(macho_file).?;
         const saddr = thunk.getAddress(macho_file) + i * trampoline_size;
         const taddr = sym.getAddress(.{}, macho_file);
-        const pages = try aarch64.calcNumberOfPages(@intCast(saddr), @intCast(taddr));
-        try writer.writeInt(u32, @bitCast(Instruction.adrp(.x16, pages << 12)), .little);
-        try writer.writeInt(u32, @bitCast(
-            Instruction.add(.x16, .x16, .{ .immediate = @truncate(taddr) }),
-        ), .little);
-        try writer.writeInt(u32, @bitCast(Instruction.br(.x16)), .little);
+        try writeTrampoline(saddr, taddr, writer);
     }
+}
+
+/// One trampoline at `saddr` to `taddr`: `adrp x16; add x16; br x16`.
+pub fn writeTrampoline(saddr: u64, taddr: u64, writer: anytype) !void {
+    const Instruction = aarch64.encoding.Instruction;
+    const pages = try aarch64.calcNumberOfPages(@intCast(saddr), @intCast(taddr));
+    try writer.writeInt(u32, @bitCast(Instruction.adrp(.x16, pages << 12)), .little);
+    try writer.writeInt(u32, @bitCast(
+        Instruction.add(.x16, .x16, .{ .immediate = @truncate(taddr) }),
+    ), .little);
+    try writer.writeInt(u32, @bitCast(Instruction.br(.x16)), .little);
 }
 
 pub fn calcSymtabSize(thunk: *Thunk, macho_file: *MachO) void {
@@ -58,7 +65,7 @@ pub fn writeSymtab(thunk: Thunk, macho_file: *MachO, ctx: anytype) void {
         n_strx += 1;
         out_sym.n_type = .{ .bits = .{ .ext = false, .type = .sect, .pext = false, .is_stab = 0 } };
         out_sym.n_sect = @intCast(thunk.out_n_sect + 1);
-        out_sym.n_value = @intCast(thunk.getTargetAddress(ref, macho_file));
+        out_sym.n_value = @intCast(thunk.getTargetAddress(ref, macho_file).?);
         out_sym.n_desc = @bitCast(@as(u16, 0));
     }
 }
@@ -85,7 +92,7 @@ const Format = struct {
     }
 };
 
-const trampoline_size = 3 * @sizeOf(u32);
+pub const trampoline_size = 3 * @sizeOf(u32);
 
 pub const Index = u32;
 
