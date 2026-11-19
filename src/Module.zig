@@ -44,6 +44,9 @@ unwind_tables: std.lang.UnwindTables,
 cc_argv: []const []const u8,
 no_builtin: bool,
 patchable_function_entry: u16,
+/// zorg: in a test build, this module's `builtin.is_test` is false (compiler_rt joining a
+/// test's ZCU, which exports its symbols only when it is not itself under test).
+not_test: bool = false,
 
 pub const Deps = std.array_hash_map.String(*Module);
 
@@ -506,6 +509,7 @@ pub fn createBuiltin(arena: Allocator, opts: Builtin, dirs: std.zig.Directories)
         .fuzz = opts.fuzz,
         .unwind_tables = opts.unwind_tables,
         .cc_argv = &.{},
+        .not_test = !opts.is_test,
         // These values are not in `opts`, but do not matter because `builtin.zig` contains no runtime code.
         .stack_check = false,
         .stack_protector = 0,
@@ -526,7 +530,7 @@ pub fn getBuiltinOptions(m: Module, global: Compilation.Config) Builtin {
         .output_mode = global.output_mode,
         .link_mode = global.link_mode,
         .unwind_tables = m.unwind_tables,
-        .is_test = global.is_test,
+        .is_test = global.is_test and !m.not_test,
         .single_threaded = m.single_threaded,
         .link_libc = global.link_libc,
         .link_libcpp = global.link_libcpp,

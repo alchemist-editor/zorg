@@ -27,6 +27,9 @@
         .macho_far_branch = .{
             .path = "macho_far_branch",
         },
+        .macho_incremental_test = .{
+            .path = "macho_incremental_test",
+        },
         .global_linkage = .{
             .path = "global_linkage",
         },
