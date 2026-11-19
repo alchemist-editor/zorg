@@ -1842,6 +1842,9 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
                 error.StackProtectorUnsupportedByTarget => unreachable,
                 error.StackProtectorUnavailableWithoutLibC => unreachable,
             };
+            // compiler_rt exports nothing when `builtin.is_test` (its own tests); in another
+            // test's ZCU (an incremental MachO link) it stands in for the library.
+            compiler_rt_mod.not_test = true;
             try options.root_mod.deps.putNoClobber(arena, "compiler_rt", compiler_rt_mod);
         }
 
